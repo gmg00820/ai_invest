@@ -1,0 +1,11 @@
+{
+    "surge_limit": 35,
+    "w_vol": 80,
+    "w_trend": 20,
+    "w_tech": 20,
+    "w_wave": 60,
+    "w_fund": 50,
+    "use_news": false,
+    "w_news": 10,
+    "top_n": 20
+}

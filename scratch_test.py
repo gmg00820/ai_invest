@@ -2,7 +2,7 @@ import urllib.request
 import urllib.error
 import json
 
-key = "AIzaSyDZRgQy43XOTGsRsR0bj8aZ3sl8gjC370s"
+key = "YOUR_API_KEY_HERE"
 models = ["gemini-1.5-flash-8b", "gemini-1.5-flash-latest", "gemini-1.0-pro"]
 results = {}
 

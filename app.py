@@ -802,26 +802,41 @@ if st.session_state.app_screening_started:
                 fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA20'], line=dict(color='green', width=1.5), name='20일선', opacity=0.8))
                 fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA60'], line=dict(color='purple', width=1.5), name='60일선', opacity=0.8))
                 
-                # 매수/매도 시그널 마커 표시
+                # 매수/매도 시그널 마커 (범례용 빈 스캐터)
                 fig.add_trace(go.Scatter(
-                    x=buy_dates, y=buy_prices,
-                    mode='markers+text',
+                    x=[None], y=[None],
+                    mode='markers',
                     marker=dict(symbol='triangle-up', color='red', size=12, line=dict(width=1, color='darkred')),
-                    text=['매수'] * len(buy_dates),
-                    textposition='bottom center',
-                    textfont=dict(color='red', size=10),
                     name='매수 신호 (단기 GC)'
                 ))
                 
                 fig.add_trace(go.Scatter(
-                    x=sell_dates, y=sell_prices,
-                    mode='markers+text',
+                    x=[None], y=[None],
+                    mode='markers',
                     marker=dict(symbol='triangle-down', color='blue', size=12, line=dict(width=1, color='darkblue')),
-                    text=['매도'] * len(sell_dates),
-                    textposition='top center',
-                    textfont=dict(color='blue', size=10),
                     name='매도 신호 (단기 DC)'
                 ))
+
+                # 말풍선 형태의 직관적인 어노테이션(Annotation) 추가
+                for d, p in zip(buy_dates, buy_prices):
+                    fig.add_annotation(
+                        x=d, y=p,
+                        text="<b>매수</b>",
+                        showarrow=True, arrowhead=1, arrowsize=2, arrowwidth=2, arrowcolor="red",
+                        ax=0, ay=35, # 화살표 방향 및 길이
+                        font=dict(color="white", size=11),
+                        bgcolor="red", bordercolor="darkred", borderwidth=1, borderpad=3, opacity=0.9
+                    )
+
+                for d, p in zip(sell_dates, sell_prices):
+                    fig.add_annotation(
+                        x=d, y=p,
+                        text="<b>매도</b>",
+                        showarrow=True, arrowhead=1, arrowsize=2, arrowwidth=2, arrowcolor="blue",
+                        ax=0, ay=-35, # 화살표 방향 및 길이
+                        font=dict(color="white", size=11),
+                        bgcolor="blue", bordercolor="darkblue", borderwidth=1, borderpad=3, opacity=0.9
+                    )
                 
                 # 최근 150일만 표시
                 if len(stock_df) > 150:
@@ -941,27 +956,7 @@ if st.session_state.app_screening_started:
             
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # --- 섹터별 히트맵 (Treemap) ---
-        theme_counts = overlap_df['테마(업종)'].value_counts().reset_index()
-        theme_counts.columns = ['테마', '종목수']
-        # '기타' 테마 제외하고 시각화
-        theme_counts = theme_counts[theme_counts['테마'] != '기타']
-        
-        if not theme_counts.empty:
-            fig_tree = go.Figure(go.Treemap(
-                labels=theme_counts['테마'],
-                parents=["오늘의 주도 테마"] * len(theme_counts),
-                values=theme_counts['종목수'],
-                textinfo="label+value",
-                marker_colorscale='Viridis'
-            ))
-            fig_tree.update_layout(
-                title="🔥 오늘의 주도 섹터 (추천 종목 분포)",
-                margin=dict(t=30, l=10, r=10, b=10),
-                height=300
-            )
-            st.plotly_chart(fig_tree, use_container_width=True)
-        
+
         st.subheader("🏆 골든 크로스: 2개 이상 알고리즘 교집합 추천 종목")
         st.markdown("서로 다른 투자 논리를 가진 두 개 이상의 검색식에 **동시에 포착된 매우 유망한 종목**들입니다. 각 알고리즘에서 얻은 점수를 합산하여 랭킹을 매겼습니다.")
         

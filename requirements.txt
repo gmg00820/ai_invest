@@ -1,0 +1,13 @@
+pandas
+numpy
+scipy
+finance-datareader
+pykrx
+tabulate
+openpyxl
+requests
+python-dotenv
+streamlit
+plotly
+setuptools
+google-generativeai

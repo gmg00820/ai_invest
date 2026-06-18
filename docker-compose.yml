@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  screener:
+    build: .
+    image: stock-screener:latest
+    container_name: stock-screener-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # 1. API 키 연동을 위한 .env 파일 마운트
+      - ./.env:/app/.env
+      
+      # 2. 로컬 데이터 캐시(*.pkl) 및 결과 파일(*.csv, *.xlsx) 연동을 위해 프로젝트 폴더 통째로 마운트
+      # 이렇게 하면 컨테이너 내부에서 다운로드한 캐시가 호스트 PC에도 남아 중복 다운로드를 막고, 
+      # 생성된 스크리닝 결과 파일도 호스트 PC에서 바로 열어볼 수 있습니다.
+      - .:/app
+      
+      # 3. 호스트 PC의 Windows용 가상환경(.venv) 디렉토리가 Linux 컨테이너 내부를 덮어쓰지 않도록 격리 설정
+      - /app/.venv
+      
+    restart: always

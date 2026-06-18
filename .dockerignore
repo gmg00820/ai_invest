@@ -1,0 +1,27 @@
+# Git 관련 파일 제외
+.git
+.gitignore
+
+# Python 가상환경 및 캐시 파일 제외
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints
+
+# 개발용 스크래치 스크립트 및 임시 파일 제외
+scratch/
+scratch_*.py
+test.ipynb
+
+# 대용량 로컬 데이터 및 캐시 파일 제외 (docker-compose 볼륨 바인딩을 통해 연동을 권장)
+*.pkl
+*.csv
+*.xlsx
+!tickers_master.csv
+
+# 환경 변수 파일 제외 (로컬의 .env가 빌드 시점에 하드코딩되는 것을 방지)
+.env
+.env.example

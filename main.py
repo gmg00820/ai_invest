@@ -1,3 +1,5 @@
+import warnings
+warnings.simplefilter(action='ignore', category=RuntimeWarning)
 import time
 import datetime
 import pandas as pd

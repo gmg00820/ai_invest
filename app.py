@@ -1,3 +1,5 @@
+import warnings
+warnings.simplefilter(action='ignore', category=RuntimeWarning)
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
@@ -77,7 +79,7 @@ if "top_n" not in st.session_state: st.session_state.top_n = s.get("top_n", 20)
 st.sidebar.header("🕹️ 구동 모드 선택")
 app_mode = st.sidebar.radio(
     "어떤 분석을 진행할까요?",
-    options=["1. 장마감 정규 스크리닝", "2. 실시간 주도주 모니터링", "3. AI 주식 애널리스트 분석"],
+    options=["1. 장마감 정규 스크리닝", "2. 실시간 주도주 모니터링", "3. AI 주식 애널리스트 분석", "4. 이전 스크리닝 결과 조회", "5. 시초가 매수 백테스트 (Score 180+)"],
     index=0
 )
 st.sidebar.markdown("---")
@@ -196,6 +198,115 @@ def fetch_market_fundamentals():
 @st.cache_resource
 def get_kis_client():
     return KISClient()
+
+# --- 공통 차트 시각화 함수 ---
+def show_charts_for_df(target_df, tickers_data, score_column="스코어", key_prefix=""):
+    if target_df.empty:
+        return
+    st.markdown("---")
+    st.subheader("📈 통과 종목 캔들차트 & 매매 신호 상세보기")
+    st.caption("클릭하여 각 종목의 주가 추세 캔들과 **매수/매도 시그널(이동평균 크로스)**을 확인하세요.")
+    
+    for idx, row in target_df.iterrows():
+        ticker = row['티커'] if '티커' in row else (row['Code'] if 'Code' in row else row.get('ticker'))
+        if not ticker:
+            continue
+        name = row.get('종목명', ticker)
+        theme = row.get('테마(업종)', '기타')
+        score = row.get(score_column, 0)
+        
+        if ticker not in tickers_data or tickers_data[ticker]['df'] is None or tickers_data[ticker]['df'].empty:
+            continue
+            
+        stock_df = tickers_data[ticker]['df'].copy()
+        
+        # 숫자형 변환
+        stock_df['open'] = pd.to_numeric(stock_df['open'], errors='coerce')
+        stock_df['high'] = pd.to_numeric(stock_df['high'], errors='coerce')
+        stock_df['low'] = pd.to_numeric(stock_df['low'], errors='coerce')
+        stock_df['close'] = pd.to_numeric(stock_df['close'], errors='coerce')
+        
+        # 이동평균선 및 매매 신호 계산 (5일선 vs 20일선)
+        stock_df['MA5'] = stock_df['close'].rolling(window=5).mean()
+        stock_df['MA20'] = stock_df['close'].rolling(window=20).mean()
+        stock_df['MA60'] = stock_df['close'].rolling(window=60).mean()
+        
+        # 골든크로스(매수) / 데드크로스(매도)
+        stock_df['Buy_Signal'] = (stock_df['MA5'] > stock_df['MA20']) & (stock_df['MA5'].shift(1) <= stock_df['MA20'].shift(1))
+        stock_df['Sell_Signal'] = (stock_df['MA5'] < stock_df['MA20']) & (stock_df['MA5'].shift(1) >= stock_df['MA20'].shift(1))
+        
+        buy_dates = stock_df[stock_df['Buy_Signal']].index
+        buy_prices = stock_df[stock_df['Buy_Signal']]['low'] * 0.96 # 캔들 살짝 아래
+        sell_dates = stock_df[stock_df['Sell_Signal']].index
+        sell_prices = stock_df[stock_df['Sell_Signal']]['high'] * 1.04 # 캔들 살짝 위
+        
+        x_dates = pd.to_datetime(stock_df.index) if type(stock_df.index) != pd.DatetimeIndex else stock_df.index
+        
+        expander_title = f"[{ticker}] {name}"
+        if '테마(업종)' in target_df.columns:
+            expander_title += f" (업종: {theme})"
+        expander_title += f" - ⭐️ {score:.1f}점"
+            
+        with st.expander(expander_title):
+            fig = go.Figure()
+            
+            # 캔들차트 (한국식 색상: 상승 빨강, 하락 파랑)
+            fig.add_trace(go.Candlestick(
+                x=x_dates,
+                open=stock_df['open'],
+                high=stock_df['high'],
+                low=stock_df['low'],
+                close=stock_df['close'],
+                increasing_line_color='red', 
+                decreasing_line_color='blue',
+                name='주가'
+            ))
+            
+            # 이동평균선
+            fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA5'], line=dict(color='orange', width=1.5), name='5일선', opacity=0.8))
+            fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA20'], line=dict(color='green', width=1.5), name='20일선', opacity=0.8))
+            fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA60'], line=dict(color='purple', width=1.5), name='60일선', opacity=0.8))
+            
+            # 매수/매도 시그널 마커 표시
+            fig.add_trace(go.Scatter(
+                x=buy_dates, y=buy_prices,
+                mode='markers+text',
+                marker=dict(symbol='triangle-up', color='red', size=12, line=dict(width=1, color='darkred')),
+                text=['매수'] * len(buy_dates),
+                textposition='bottom center',
+                textfont=dict(color='red', size=10),
+                name='매수 신호 (단기 GC)'
+            ))
+            
+            fig.add_trace(go.Scatter(
+                x=sell_dates, y=sell_prices,
+                mode='markers+text',
+                marker=dict(symbol='triangle-down', color='blue', size=12, line=dict(width=1, color='darkblue')),
+                text=['매도'] * len(sell_dates),
+                textposition='top center',
+                textfont=dict(color='blue', size=10),
+                name='매도 신호 (단기 DC)'
+            ))
+            
+            # 최근 150일만 표시
+            if len(stock_df) > 150:
+                x_min = x_dates[-150]
+            else:
+                x_min = x_dates[0]
+            x_max = x_dates[-1]
+
+            fig.update_layout(
+                title=f"'{name}' 일봉 차트 (추세 및 매매 신호)",
+                yaxis_title="주가 (KRW)",
+                xaxis_rangeslider_visible=False,
+                xaxis=dict(range=[x_min, x_max]),
+                height=500,
+                margin=dict(l=0, r=0, t=40, b=0),
+                template="plotly_white",
+                hovermode='x unified',
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
+            st.plotly_chart(fig, width="stretch", key=f"chart_{key_prefix}_{ticker}_{idx}")
 
 if app_mode == "2. 실시간 주도주 모니터링":
     st.subheader("🔥 실시간 주도주 모니터링 (Top 100 단독 모드)")
@@ -584,6 +695,531 @@ elif app_mode == "3. AI 주식 애널리스트 분석":
                         
     st.stop()
 
+elif app_mode == "4. 이전 스크리닝 결과 조회":
+    import glob
+    import re
+    
+    st.subheader("📂 이전 스크리닝 결과 조회")
+    st.markdown("저장된 과거 스크리닝 결과 파일(`screening_results_*.csv`, `screening_results_*.xlsx`)을 불러와 당시 결과와 현재 시점의 실시간 정보를 조회합니다.")
+    
+    # 1. 파일 스캔
+    workspace_dir = os.path.dirname(os.path.abspath(__file__))
+    files = glob.glob(os.path.join(workspace_dir, "screening_results_*.*"))
+    
+    # csv 또는 xlsx 만 필터링
+    valid_files = []
+    for f in files:
+        if f.endswith(('.csv', '.xlsx')):
+            valid_files.append(f)
+            
+    if not valid_files:
+        st.warning("저장된 스크리닝 결과 파일이 존재하지 않습니다.")
+    else:
+        # 파일 목록 정렬 (파일명에 날짜가 들어가므로 문자열 내림차순 정렬하면 최신순이 됨)
+        valid_files = sorted(valid_files, key=lambda x: os.path.basename(x), reverse=True)
+        
+        # 파일명을 예쁘게 보여주기 위한 사전형 생성
+        file_options = {}
+        for f in valid_files:
+            basename = os.path.basename(f)
+            match = re.search(r'screening_results_(\d{8})', basename)
+            if match:
+                date_str = match.group(1)
+                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                ext = "CSV" if basename.endswith('.csv') else "Excel"
+                label = f"📅 {formatted_date} 스크리닝 결과 ({ext})"
+            else:
+                label = basename
+            file_options[label] = f
+            
+        selected_label = st.selectbox("조회할 과거 스크리닝 결과 선택", options=list(file_options.keys()))
+        selected_file = file_options[selected_label]
+        
+        # 2. 파일 로드
+        try:
+            if selected_file.endswith('.csv'):
+                df_past = pd.read_csv(selected_file, dtype={'티커': str, 'Code': str, 'ticker': str, '코드': str})
+            else:
+                df_past = pd.read_excel(selected_file, dtype={'티커': str, 'Code': str, 'ticker': str, '코드': str})
+                
+            st.success(f"✅ '{selected_label}' 파일을 성공적으로 불러왔습니다. (총 {len(df_past)}개 종목)")
+            
+            # 티커 컬럼명 표준화
+            ticker_col = None
+            for col in ['티커', 'Code', 'ticker', '코드']:
+                if col in df_past.columns:
+                    ticker_col = col
+                    break
+            
+            if ticker_col is None:
+                for col in df_past.columns:
+                    sample = df_past[col].dropna().astype(str).head(5)
+                    if any(s.isdigit() and len(s) in [5, 6] for s in sample):
+                        ticker_col = col
+                        break
+            
+            if ticker_col is None:
+                st.error("파일에서 종목코드(티커) 열을 찾을 수 없습니다. 파일 열 구성을 확인해주세요.")
+            else:
+                df_past[ticker_col] = df_past[ticker_col].astype(str).str.zfill(6)
+                
+                # 과거 데이터 테이블 표시
+                st.subheader("📋 과거 스크리닝 데이터 내역")
+                st.dataframe(df_past, use_container_width=True, hide_index=True)
+                
+                # 3. 현재 시점 시세 및 차트 조회
+                st.markdown("---")
+                st.subheader("🔄 현재 시점 시세 및 차트 조회")
+                st.markdown("과거에 스크리닝되었던 이 종목들의 **현재 실시간 주가와 골든크로스 신호**를 확인합니다.")
+                
+                col_btn1, col_btn2 = st.columns(2)
+                with col_btn1:
+                    run_chart = st.button("📈 실시간 시세 및 차트 확인하기", type="primary")
+                with col_btn2:
+                    run_rescreen = st.checkbox("🔍 현재 시점에서 퀀트 점수(Score) 재평가 및 비교하기", value=True)
+                
+                if run_chart:
+                    tickers = df_past[ticker_col].tolist()
+                    
+                    with st.spinner("선택된 종목들의 현재 시세 데이터 및 과거 차트 데이터를 불러오는 중..."):
+                        kis_client = get_kis_client()
+                        all_stocks = fetch_market_tickers()
+                        ticker_to_name = dict(zip(all_stocks['Code'], all_stocks['Name'])) if not all_stocks.empty else {}
+                        ticker_to_theme = dict(zip(all_stocks['Code'], all_stocks['Theme'])) if not all_stocks.empty else {}
+                        ticker_to_marcap = dict(zip(all_stocks['Code'], all_stocks['Marcap'])) if 'Marcap' in all_stocks.columns else {}
+                        
+                        today_str_cur = datetime.now().strftime("%Y%m%d")
+                        start_date_cur = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+                        
+                        current_tickers_data = {}
+                        fund_df = fetch_market_fundamentals()
+                        
+                        progress_text = st.empty()
+                        for idx_t, t in enumerate(tickers):
+                            progress_text.text(f"시세 수집 중... ({idx_t+1}/{len(tickers)}) {ticker_to_name.get(t, t)}")
+                            try:
+                                df_hist = kis_client.get_daily_ohlcv(t, start_date_cur, today_str_cur)
+                                if df_hist is not None and not df_hist.empty:
+                                    try:
+                                        fund_row = fund_df.loc[t].to_dict() if (not fund_df.empty and t in fund_df.index) else {}
+                                    except:
+                                        fund_row = {}
+                                    current_tickers_data[t] = {
+                                        "name": ticker_to_name.get(t, t),
+                                        "theme": ticker_to_theme.get(t, "기타"),
+                                        "marcap": ticker_to_marcap.get(t, 0),
+                                        "df": df_hist,
+                                        "fundamentals": fund_row
+                                    }
+                            except Exception as e:
+                                pass
+                            time.sleep(0.04)
+                        
+                        progress_text.empty()
+                        
+                        if not current_tickers_data:
+                            st.error("종목의 현재 시세를 불러오지 못했습니다. KIS API 설정을 확인하세요.")
+                        else:
+                            current_prices = kis_client.get_current_prices_batch(list(current_tickers_data.keys()))
+                            for t, price_data in current_prices.items():
+                                if t in current_tickers_data:
+                                    df = current_tickers_data[t]['df']
+                                    if df is not None and not df.empty:
+                                        df.iloc[-1, df.columns.get_loc('close')] = price_data['price']
+                                        df.iloc[-1, df.columns.get_loc('volume')] = price_data['volume']
+                                        df.iloc[-1, df.columns.get_loc('high')] = max(df['high'].iloc[-1], price_data['high'])
+                                        df.iloc[-1, df.columns.get_loc('low')] = min(df['low'].iloc[-1], price_data['low'])
+                            
+                            # 4. 퀀트 점수 재평가 실행 여부
+                            if run_rescreen:
+                                st.subheader("📊 현재 시점 퀀트 스코어 재평가 결과")
+                                screener = StockScreener()
+                                screener.conditions[0].max_surge_rate = st.session_state.surge_limit
+                                screener.conditions[1].weight = st.session_state.w_vol
+                                screener.conditions[2].weight = st.session_state.w_trend
+                                screener.conditions[3].weight = st.session_state.w_tech
+                                screener.conditions[4].weight = st.session_state.w_wave
+                                screener.conditions[5].weight = st.session_state.w_fund
+                                screener.conditions[6].weight = st.session_state.w_news if st.session_state.use_news else 0
+                                screener.conditions[6].is_active = st.session_state.use_news
+                                
+                                results_df_cur = screener.run(current_tickers_data)
+                                if not results_df_cur.empty:
+                                    past_score_col = None
+                                    for col in ['총점', '스코어', 'Score', '합산 스코어']:
+                                        if col in df_past.columns:
+                                            past_score_col = col
+                                            break
+                                    
+                                    if past_score_col:
+                                        past_sub = df_past[[ticker_col, past_score_col]].rename(columns={past_score_col: "과거 총점"})
+                                        cur_sub = results_df_cur[['티커', '종목명', '테마(업종)', '총점']].rename(columns={'티커': ticker_col, '총점': '현재 총점'})
+                                        
+                                        compare_df = pd.merge(cur_sub, past_sub, on=ticker_col, how='left')
+                                        compare_df['과거 총점'] = pd.to_numeric(compare_df['과거 총점'], errors='coerce').fillna(0.0)
+                                        compare_df['변화량'] = compare_df['현재 총점'] - compare_df['과거 총점']
+                                        
+                                        compare_df = compare_df.sort_values(by="현재 총점", ascending=False).reset_index(drop=True)
+                                        
+                                        st.dataframe(
+                                            compare_df,
+                                            use_container_width=True,
+                                            hide_index=True,
+                                            column_config={
+                                                "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                                                ticker_col: st.column_config.TextColumn("티커", width="small"),
+                                                "테마(업종)": st.column_config.TextColumn("테마(업종)", width="medium"),
+                                                "과거 총점": st.column_config.NumberColumn("과거 총점", format="%.1f 점"),
+                                                "현재 총점": st.column_config.ProgressColumn(
+                                                    "현재 총점",
+                                                    format="%.1f 점",
+                                                    min_value=0,
+                                                    max_value=120
+                                                ),
+                                                "변화량": st.column_config.NumberColumn("점수 변화량", format="%+.1f 점")
+                                            }
+                                        )
+                                    else:
+                                        st.dataframe(
+                                            results_df_cur,
+                                            use_container_width=True,
+                                            hide_index=True,
+                                            column_config={
+                                                "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                                                "티커": st.column_config.TextColumn("티커", width="small"),
+                                                "테마(업종)": st.column_config.TextColumn("테마(업종)", width="medium"),
+                                                "총점": st.column_config.ProgressColumn(
+                                                    "현재 총점 (Score)",
+                                                    format="%.1f 점",
+                                                    min_value=0,
+                                                    max_value=120
+                                                ),
+                                                "만족조건 (가독성 최적화)": st.column_config.TextColumn("현재 만족 지표 요약", width="large")
+                                            }
+                                        )
+                                else:
+                                    st.warning("현재 기준으로는 스크리닝 조건을 만족하는 종목이 없습니다 (점수 획득 실패).")
+                            
+                            show_charts_for_df(df_past.rename(columns={ticker_col: '티커'}), current_tickers_data, score_column="총점", key_prefix="past_viewer")
+        except Exception as e:
+            st.error(f"파일을 읽는 중 에러가 발생했습니다: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            
+    st.stop()
+
+elif app_mode == "5. 시초가 매수 백테스트 (Score 180+)":
+    import glob
+    import re
+    
+    st.subheader("🚀 시초가 매수 백테스트 (Score 180+)")
+    st.markdown("과거 스크리닝 결과 파일에서 일정 점수 이상 획득한 종목들을 **다음 영업일 09:00 시초가에 매수**하여 당일 수익률이 어떻게 나타나는지 백테스트합니다.")
+    
+    # 1. 파일 스캔
+    workspace_dir = os.path.dirname(os.path.abspath(__file__))
+    files = glob.glob(os.path.join(workspace_dir, "screening_results_*.*"))
+    
+    valid_files = []
+    for f in files:
+        if f.endswith(('.csv', '.xlsx')):
+            valid_files.append(f)
+            
+    if not valid_files:
+        st.warning("저장된 스크리닝 결과 파일이 존재하지 않습니다.")
+    else:
+        # 파일 목록 정렬 (파일명에 날짜가 들어가므로 최신순 정렬)
+        valid_files = sorted(valid_files, key=lambda x: os.path.basename(x), reverse=True)
+        
+        file_options = {}
+        for f in valid_files:
+            basename = os.path.basename(f)
+            match = re.search(r'screening_results_(\d{8})', basename)
+            if match:
+                date_str = match.group(1)
+                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                ext = "CSV" if basename.endswith('.csv') else "Excel"
+                label = f"📅 {formatted_date} ({ext})"
+            else:
+                label = basename
+            file_options[label] = f
+            
+        # 다중 선택 및 최소 스코어 튜닝
+        st.markdown("### ⚙️ 백테스트 설정")
+        col_sel1, col_sel2 = st.columns([3, 1])
+        with col_sel1:
+            selected_labels = st.multiselect(
+                "백테스트에 포함할 스크리닝 날짜 선택", 
+                options=list(file_options.keys()), 
+                default=list(file_options.keys())
+            )
+        with col_sel2:
+            score_threshold = st.number_input("진입 기준 최소 스코어", min_value=0, max_value=200, value=180, step=10)
+            
+        run_backtest = st.button("🚀 백테스트 실행하기", type="primary")
+        
+        if run_backtest and selected_labels:
+            # 2. 로컬 캐시 파일 로드
+            CACHE_PATH = os.path.join(workspace_dir, "backtest_ohlcv_cache.pkl")
+            if os.path.exists(CACHE_PATH):
+                try:
+                    with open(CACHE_PATH, "rb") as f:
+                        backtest_cache = pickle.load(f)
+                except:
+                    backtest_cache = {}
+            else:
+                backtest_cache = {}
+                
+            kis_client = get_kis_client()
+            
+            # API 호출이 필요 없는 경우의 속도를 위해
+            progress_bar = st.progress(0, text="백테스트 분석 중...")
+            
+            all_trades = []
+            
+            total_files = len(selected_labels)
+            
+            # 3. 각 파일 분석
+            for idx_f, label in enumerate(selected_labels):
+                progress_bar.progress(idx_f / total_files, text=f"분석 중: {label}...")
+                file_path = file_options[label]
+                
+                # 파일명에서 날짜 파싱
+                basename = os.path.basename(file_path)
+                match = re.search(r'screening_results_(\d{8})', basename)
+                if not match:
+                    continue
+                date_str = match.group(1)
+                screening_date = pd.to_datetime(date_str, format="%Y%m%d")
+                
+                try:
+                    if file_path.endswith('.csv'):
+                        df_past = pd.read_csv(file_path, dtype={'티커': str, 'Code': str, 'ticker': str, '코드': str})
+                    else:
+                        df_past = pd.read_excel(file_path, dtype={'티커': str, 'Code': str, 'ticker': str, '코드': str})
+                except Exception as e:
+                    st.error(f"'{label}' 파일을 읽는 중 오류가 발생하여 건너뜁니다: {e}")
+                    continue
+                    
+                # 티커 컬럼명 표준화
+                ticker_col = None
+                for col in ['티커', 'Code', 'ticker', '코드']:
+                    if col in df_past.columns:
+                        ticker_col = col
+                        break
+                if ticker_col is None:
+                    for col in df_past.columns:
+                        sample = df_past[col].dropna().astype(str).head(5)
+                        if any(s.isdigit() and len(s) in [5, 6] for s in sample):
+                            ticker_col = col
+                            break
+                            
+                score_col = None
+                for col in ['총점', '스코어', 'Score', '합산 스코어']:
+                    if col in df_past.columns:
+                        score_col = col
+                        break
+                        
+                if ticker_col is None or score_col is None:
+                    st.warning(f"'{label}' 파일에서 티커 또는 점수 컬럼을 찾을 수 없어 건너뜁니다.")
+                    continue
+                    
+                df_past[ticker_col] = df_past[ticker_col].astype(str).str.zfill(6)
+                
+                # 임계값 이상 필터링
+                df_filtered = df_past[pd.to_numeric(df_past[score_col], errors='coerce') >= score_threshold]
+                
+                for _, row in df_filtered.iterrows():
+                    ticker = row[ticker_col]
+                    name = row.get('종목명', row.get('Name', ticker))
+                    score = row[score_col]
+                    
+                    df_hist = None
+                    if ticker in backtest_cache:
+                        df_hist = backtest_cache[ticker]
+                    else:
+                        start_fetch = "20260301"
+                        end_fetch = datetime.now().strftime("%Y%m%d")
+                        try:
+                            df_hist = kis_client.get_daily_ohlcv(ticker, start_fetch, end_fetch)
+                            if df_hist is not None and not df_hist.empty:
+                                backtest_cache[ticker] = df_hist
+                                time.sleep(0.04)
+                        except Exception:
+                            pass
+                            
+                    if df_hist is None or df_hist.empty:
+                        continue
+                        
+                    # 스크리닝 날짜(T) 이후의 첫 번째 거래일(T_next) 찾기
+                    df_after = df_hist[df_hist.index > screening_date]
+                    if df_after.empty:
+                        all_trades.append({
+                            "스크리닝 날짜": screening_date.strftime("%Y-%m-%d"),
+                            "종목명": name,
+                            "티커": ticker,
+                            "스코어": score,
+                            "매수일": "N/A (영업일 대기 중)",
+                            "시초가": 0,
+                            "고가": 0,
+                            "저가": 0,
+                            "종가": 0,
+                            "수익률(종가)": 0.0,
+                            "최대상승률(고가)": 0.0,
+                            "최대하락률(저가)": 0.0,
+                            "상태": "데이터 없음 (미래 영업일)"
+                        })
+                        continue
+                        
+                    next_day_row = df_after.iloc[0]
+                    next_day_date = df_after.index[0]
+                    
+                    oprc = float(next_day_row['open'])
+                    hgpr = float(next_day_row['high'])
+                    lwpr = float(next_day_row['low'])
+                    clpr = float(next_day_row['close'])
+                    
+                    if oprc <= 0:
+                        continue
+                        
+                    ret_close = (clpr - oprc) / oprc * 100
+                    ret_high = (hgpr - oprc) / oprc * 100
+                    ret_low = (lwpr - oprc) / oprc * 100
+                    
+                    all_trades.append({
+                        "스크리닝 날짜": screening_date.strftime("%Y-%m-%d"),
+                        "종목명": name,
+                        "티커": ticker,
+                        "스코어": score,
+                        "매수일": next_day_date.strftime("%Y-%m-%d"),
+                        "시초가": oprc,
+                        "고가": hgpr,
+                        "저가": lwpr,
+                        "종가": clpr,
+                        "수익률(종가)": round(ret_close, 2),
+                        "최대상승률(고가)": round(ret_high, 2),
+                        "최대하락률(저가)": round(ret_low, 2),
+                        "상태": "완료"
+                    })
+            
+            # 캐시 업데이트 영구 저장
+            try:
+                with open(CACHE_PATH, "wb") as f:
+                    pickle.dump(backtest_cache, f)
+            except:
+                pass
+                
+            progress_bar.progress(1.0, text="✅ 백테스트 완료!")
+            time.sleep(0.5)
+            progress_bar.empty()
+            
+            if not all_trades:
+                st.warning("백테스트 조건을 충족하는 거래 내역이 없습니다.")
+            else:
+                trades_df = pd.DataFrame(all_trades)
+                completed_trades = trades_df[trades_df['상태'] == "완료"]
+                
+                if completed_trades.empty:
+                    st.info("거래일 데이터가 아직 축적되지 않은 대기 종목들만 매칭되었습니다.")
+                    st.dataframe(trades_df, use_container_width=True, hide_index=True)
+                else:
+                    st.subheader("📊 백테스트 성과 종합 요약")
+                    
+                    total_count = len(completed_trades)
+                    avg_ret_close = completed_trades['수익률(종가)'].mean()
+                    avg_ret_high = completed_trades['최대상승률(고가)'].mean()
+                    avg_ret_low = completed_trades['최대하락률(저가)'].mean()
+                    
+                    win_rate = (completed_trades['수익률(종가)'] > 0).sum() / total_count * 100
+                    best_trade = completed_trades.loc[completed_trades['수익률(종가)'].idxmax()]
+                    worst_trade = completed_trades.loc[completed_trades['수익률(종가)'].idxmin()]
+                    
+                    col_met1, col_met2, col_met3 = st.columns(3)
+                    with col_met1:
+                        st.metric("총 진입 거래 수", f"{total_count}건")
+                        st.metric("평균 수익률 (종가 기준)", f"{avg_ret_close:.2f}%")
+                    with col_met2:
+                        st.metric("승률 (종가 > 시가)", f"{win_rate:.1f}%")
+                        st.metric("평균 최대 상승률 (고가 기준)", f"{avg_ret_high:.2f}%")
+                    with col_met3:
+                        st.metric("최고 수익률 종목", f"{best_trade['종목명']} ({best_trade['수익률(종가)']:.2f}%)")
+                        st.metric("평균 최대 하락률 (저가 기준)", f"{avg_ret_low:.2f}%")
+                        
+                    st.markdown("---")
+                    st.subheader("📈 날짜별 평균 수익률 추이")
+                    
+                    daily_summary = completed_trades.groupby("스크리닝 날짜").agg({
+                        "티커": "count",
+                        "수익률(종가)": "mean",
+                        "최대상승률(고가)": "mean",
+                        "최대하락률(저가)": "mean"
+                    }).rename(columns={"티커": "종목수"}).reset_index()
+                    
+                    daily_summary["수익률(종가)"] = daily_summary["수익률(종가)"].round(2)
+                    daily_summary["최대상승률(고가)"] = daily_summary["최대상승률(고가)"].round(2)
+                    daily_summary["최대하락률(저가)"] = daily_summary["최대하락률(저가)"].round(2)
+                    
+                    fig_bt = go.Figure()
+                    fig_bt.add_trace(go.Bar(
+                        x=daily_summary["스크리닝 날짜"],
+                        y=daily_summary["수익률(종가)"],
+                        name="평균 종가 수익률 (%)",
+                        marker_color='royalblue'
+                    ))
+                    fig_bt.add_trace(go.Scatter(
+                        x=daily_summary["스크리닝 날짜"],
+                        y=daily_summary["최대상승률(고가)"],
+                        name="평균 최대 상승률 (%)",
+                        mode="lines+markers",
+                        line=dict(color='crimson', width=2)
+                    ))
+                    fig_bt.update_layout(
+                        title="스크리닝 날짜별 백테스트 평균 성과",
+                        xaxis_title="스크리닝 일자",
+                        yaxis_title="수익률 (%)",
+                        barmode='group',
+                        template="plotly_white",
+                        height=400,
+                        margin=dict(l=40, r=40, t=60, b=40)
+                    )
+                    st.plotly_chart(fig_bt, use_container_width=True, key="backtest_daily_chart")
+                    
+                    st.markdown("#### 스크리닝 일자별 요약")
+                    st.dataframe(
+                        daily_summary, 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "스크리닝 날짜": st.column_config.TextColumn("스크리닝 일자"),
+                            "종목수": st.column_config.NumberColumn("통과 종목수 (N)"),
+                            "수익률(종가)": st.column_config.NumberColumn("평균 종가 수익률", format="%.2f%%"),
+                            "최대상승률(고가)": st.column_config.NumberColumn("평균 최대 상승률", format="%.2f%%"),
+                            "최대하락률(저가)": st.column_config.NumberColumn("평균 최대 하락률", format="%.2f%%")
+                        }
+                    )
+                    
+                    st.markdown("---")
+                    st.subheader("📋 전체 상세 거래 내역")
+                    st.markdown(f"스코어 **{score_threshold}점** 이상인 진입 대상 종목들의 개별 수익 내역입니다.")
+                    st.dataframe(
+                        trades_df.sort_values(by="스크리닝 날짜", ascending=False), 
+                        use_container_width=True, 
+                        hide_index=True,
+                        column_config={
+                            "시초가": st.column_config.NumberColumn("시초가 (매수)", format="%d원"),
+                            "고가": st.column_config.NumberColumn("당일 고가", format="%d원"),
+                            "저가": st.column_config.NumberColumn("당일 저가", format="%d원"),
+                            "종가": st.column_config.NumberColumn("당일 종가 (매도)", format="%d원"),
+                            "수익률(종가)": st.column_config.NumberColumn("수익률(종가)", format="%.2f%%"),
+                            "최대상승률(고가)": st.column_config.NumberColumn("최대 상승률", format="%.2f%%"),
+                            "최대하락률(저가)": st.column_config.NumberColumn("최대 하락률", format="%.2f%%")
+                        }
+                    )
+                    
+        elif run_backtest and not selected_labels:
+            st.warning("최소 하나 이상의 스크리닝 날짜를 선택해야 합니다.")
+            
+    st.stop()
+
 # ================================
 # 모드 1: 장마감 정규 스크리닝 (전 종목)
 # ================================
@@ -736,112 +1372,7 @@ if st.session_state.app_screening_started:
         cached = st.session_state.cached_dfs
         results_df, mr_df, vb_df, mf_df, magic_df, pb_df = cached["results"], cached["mr"], cached["vb"], cached["mf"], cached["magic"], cached["pb"]
 
-    # --- 공통 차트 시각화 함수 ---
-    def show_charts_for_df(target_df, score_column="스코어"):
-        if target_df.empty:
-            return
-        st.markdown("---")
-        st.subheader("📈 통과 종목 캔들차트 & 매매 신호 상세보기")
-        st.caption("클릭하여 각 종목의 주가 추세 캔들과 **매수/매도 시그널(이동평균 크로스)**을 확인하세요.")
-        
-        for idx, row in target_df.iterrows():
-            ticker = row['티커']
-            name = row.get('종목명', ticker)
-            theme = row.get('테마(업종)', '기타')
-            score = row.get(score_column, 0)
-            
-            if ticker not in tickers_data or tickers_data[ticker]['df'] is None or tickers_data[ticker]['df'].empty:
-                continue
-                
-            stock_df = tickers_data[ticker]['df'].copy()
-            
-            # 숫자형 변환
-            stock_df['open'] = pd.to_numeric(stock_df['open'], errors='coerce')
-            stock_df['high'] = pd.to_numeric(stock_df['high'], errors='coerce')
-            stock_df['low'] = pd.to_numeric(stock_df['low'], errors='coerce')
-            stock_df['close'] = pd.to_numeric(stock_df['close'], errors='coerce')
-            
-            # 이동평균선 및 매매 신호 계산 (5일선 vs 20일선)
-            stock_df['MA5'] = stock_df['close'].rolling(window=5).mean()
-            stock_df['MA20'] = stock_df['close'].rolling(window=20).mean()
-            stock_df['MA60'] = stock_df['close'].rolling(window=60).mean()
-            
-            # 골든크로스(매수) / 데드크로스(매도)
-            stock_df['Buy_Signal'] = (stock_df['MA5'] > stock_df['MA20']) & (stock_df['MA5'].shift(1) <= stock_df['MA20'].shift(1))
-            stock_df['Sell_Signal'] = (stock_df['MA5'] < stock_df['MA20']) & (stock_df['MA5'].shift(1) >= stock_df['MA20'].shift(1))
-            
-            buy_dates = stock_df[stock_df['Buy_Signal']].index
-            buy_prices = stock_df[stock_df['Buy_Signal']]['low'] * 0.96 # 캔들 살짝 아래
-            sell_dates = stock_df[stock_df['Sell_Signal']].index
-            sell_prices = stock_df[stock_df['Sell_Signal']]['high'] * 1.04 # 캔들 살짝 위
-            
-            x_dates = pd.to_datetime(stock_df.index) if type(stock_df.index) != pd.DatetimeIndex else stock_df.index
-            
-            expander_title = f"[{ticker}] {name}"
-            if '테마(업종)' in target_df.columns:
-                expander_title += f" (업종: {theme})"
-            expander_title += f" - ⭐️ {score:.1f}점"
-                
-            with st.expander(expander_title):
-                fig = go.Figure()
-                
-                # 캔들차트 (한국식 색상: 상승 빨강, 하락 파랑)
-                fig.add_trace(go.Candlestick(
-                    x=x_dates,
-                    open=stock_df['open'],
-                    high=stock_df['high'],
-                    low=stock_df['low'],
-                    close=stock_df['close'],
-                    increasing_line_color='red', 
-                    decreasing_line_color='blue',
-                    name='주가'
-                ))
-                
-                # 이동평균선
-                fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA5'], line=dict(color='orange', width=1.5), name='5일선', opacity=0.8))
-                fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA20'], line=dict(color='green', width=1.5), name='20일선', opacity=0.8))
-                fig.add_trace(go.Scatter(x=x_dates, y=stock_df['MA60'], line=dict(color='purple', width=1.5), name='60일선', opacity=0.8))
-                
-                # 매수/매도 시그널 마커 표시
-                fig.add_trace(go.Scatter(
-                    x=buy_dates, y=buy_prices,
-                    mode='markers+text',
-                    marker=dict(symbol='triangle-up', color='red', size=12, line=dict(width=1, color='darkred')),
-                    text=['매수'] * len(buy_dates),
-                    textposition='bottom center',
-                    textfont=dict(color='red', size=10),
-                    name='매수 신호 (단기 GC)'
-                ))
-                
-                fig.add_trace(go.Scatter(
-                    x=sell_dates, y=sell_prices,
-                    mode='markers+text',
-                    marker=dict(symbol='triangle-down', color='blue', size=12, line=dict(width=1, color='darkblue')),
-                    text=['매도'] * len(sell_dates),
-                    textposition='top center',
-                    textfont=dict(color='blue', size=10),
-                    name='매도 신호 (단기 DC)'
-                ))
-                
-                # 최근 150일만 표시
-                if len(stock_df) > 150:
-                    x_min = x_dates[-150]
-                else:
-                    x_min = x_dates[0]
-                x_max = x_dates[-1]
-
-                fig.update_layout(
-                    title=f"'{name}' 일봉 차트 (추세 및 매매 신호)",
-                    yaxis_title="주가 (KRW)",
-                    xaxis_rangeslider_visible=False,
-                    xaxis=dict(range=[x_min, x_max]),
-                    height=500,
-                    margin=dict(l=0, r=0, t=40, b=0),
-                    template="plotly_white",
-                    hovermode='x unified',
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                )
-                st.plotly_chart(fig, use_container_width=True)
+    # show_charts_for_df is now defined at the top level to be shared by different modes.
         
     # === 교집합 분석 및 추천 ===
     def get_top_tickers_with_scores(df, score_col):
@@ -960,7 +1491,7 @@ if st.session_state.app_screening_started:
                 margin=dict(t=30, l=10, r=10, b=10),
                 height=300
             )
-            st.plotly_chart(fig_tree, use_container_width=True)
+            st.plotly_chart(fig_tree, width="stretch", key="theme_treemap")
         
         st.subheader("🏆 골든 크로스: 2개 이상 알고리즘 교집합 추천 종목")
         st.markdown("서로 다른 투자 논리를 가진 두 개 이상의 검색식에 **동시에 포착된 매우 유망한 종목**들입니다. 각 알고리즘에서 얻은 점수를 합산하여 랭킹을 매겼습니다.")
@@ -977,7 +1508,7 @@ if st.session_state.app_screening_started:
             }
         )
         
-        show_charts_for_df(overlap_df, score_column="합산 스코어")
+        show_charts_for_df(overlap_df, tickers_data, score_column="합산 스코어", key_prefix="overlap")
         st.markdown("---")
         
         # Kiwoom 봇 자동 연동을 위해 로컬 파일로 자동 저장
@@ -1055,7 +1586,7 @@ if st.session_state.app_screening_started:
             )
             
             
-            show_charts_for_df(final_df, score_column="총점")
+            show_charts_for_df(final_df, tickers_data, score_column="총점", key_prefix="final")
             
             # CSV 다운로드 버튼
             csv = final_df.to_csv(index=False, encoding='utf-8-sig')
@@ -1088,7 +1619,7 @@ if st.session_state.app_screening_started:
             else:
                 st.success(f"{len(mr_df)}개 종목 발견! (Z-Score 오름차순 정렬)")
             st.dataframe(mr_df, use_container_width=True, hide_index=True)
-            show_charts_for_df(mr_df, score_column="스코어")
+            show_charts_for_df(mr_df, tickers_data, score_column="스코어", key_prefix="mr")
 
     with tab3:
         st.subheader("🚀 전략 2: 변동성 돌파 (Volatility Breakout)")
@@ -1103,7 +1634,7 @@ if st.session_state.app_screening_started:
             else:
                 st.success(f"{len(vb_df)}개 종목 발견! (돌파 강도 내림차순 정렬)")
             st.dataframe(vb_df, use_container_width=True, hide_index=True)
-            show_charts_for_df(vb_df, score_column="스코어")
+            show_charts_for_df(vb_df, tickers_data, score_column="스코어", key_prefix="vb")
 
     with tab4:
         st.subheader("⚖️ 전략 3: 멀티 팩터 Z-Score 랭킹")
@@ -1118,7 +1649,7 @@ if st.session_state.app_screening_started:
             else:
                 st.success(f"상위 20%의 멀티팩터 우량 종목 {len(mf_df)}개입니다. (총점 내림차순)")
             st.dataframe(mf_df, use_container_width=True, hide_index=True)
-            show_charts_for_df(mf_df, score_column="스코어")
+            show_charts_for_df(mf_df, tickers_data, score_column="스코어", key_prefix="mf")
 
     with tab5:
         st.subheader("♻️ 전략 4: 롱텀 매직 (Long-term Magic)")
@@ -1133,7 +1664,7 @@ if st.session_state.app_screening_started:
             else:
                 st.success(f"{len(magic_df)}개 종목 발견!")
             st.dataframe(magic_df, use_container_width=True, hide_index=True)
-            show_charts_for_df(magic_df, score_column="스코어")
+            show_charts_for_df(magic_df, tickers_data, score_column="스코어", key_prefix="magic")
 
     with tab6:
         st.subheader("🎯 전략 5: 눌림목 & 급등 전조 (Pullback & Pre-Breakout)")
@@ -1148,5 +1679,5 @@ if st.session_state.app_screening_started:
             else:
                 st.success(f"{len(pb_df)}개 종목 발견! (스코어 내림차순 정렬)")
             st.dataframe(pb_df, use_container_width=True, hide_index=True)
-            show_charts_for_df(pb_df, score_column="스코어")
+            show_charts_for_df(pb_df, tickers_data, score_column="스코어", key_prefix="pb")
 
